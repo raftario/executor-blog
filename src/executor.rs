@@ -54,8 +54,8 @@ impl Executor {
     }
 
     pub fn with_workers(num_workers: usize) -> Self {
-        let mut workers = Vec::with_capacity(num_workers);
         let mut stealers = Vec::with_capacity(num_workers);
+        let mut workers = Vec::with_capacity(num_workers);
         for _ in 0..num_workers {
             let worker = Worker::new_fifo();
             stealers.push(worker.stealer());
@@ -148,7 +148,7 @@ impl Executor {
 }
 
 impl WeakExecutor {
-    fn upgrade(&self) -> Option<Executor> {
+    fn upgrade(self) -> Option<Executor> {
         if self.handle.refs.fetch_add(1, SeqCst) == 0 {
             self.handle.refs.fetch_sub(1, SeqCst);
             self.handle.parking.unpark_all();
@@ -156,7 +156,7 @@ impl WeakExecutor {
         }
 
         Some(Executor {
-            handle: self.handle.clone(),
+            handle: self.handle,
         })
     }
 
@@ -164,6 +164,13 @@ impl WeakExecutor {
         let previous = CURRENT.with(|c| c.borrow_mut().replace(self));
         EnterGuard { previous }
     }
+}
+
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    current()
+        .map(|e| e.upgrade().expect("executor is shut down"))
+        .unwrap_or_default()
+        .block_on(future)
 }
 
 pub fn spawn<F: Future>(future: F) -> Task<F::Output>

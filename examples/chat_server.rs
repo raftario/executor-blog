@@ -1,5 +1,4 @@
 use async_net::{TcpListener, TcpStream};
-use executor::Executor;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
     select,
@@ -7,8 +6,7 @@ use tokio::{
 };
 
 fn main() {
-    let executor = Executor::new();
-    executor.block_on(server());
+    executor::block_on(server())
 }
 
 async fn server() {

@@ -1,5 +1,4 @@
 use async_net::TcpStream;
-use executor::Executor;
 use flume::Sender;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use std::{
@@ -18,8 +17,7 @@ macro_rules! println {
 }
 
 fn main() {
-    let executor = Executor::new();
-    executor.block_on(client())
+    executor::block_on(client())
 }
 
 async fn client() {
