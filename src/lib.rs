@@ -20,14 +20,14 @@ mod tests {
 
     #[test]
     fn spawn_blocking() {
-        let four = super::block_on(async { super::spawn_blocking(|| 2 + 2).await.unwrap() });
+        let four = super::block_on(async { super::spawn_blocking(|| 2 + 2).await });
         assert_eq!(four, 4);
     }
 
     #[test]
     fn spawn_spawn_blocking() {
         let four = super::block_on(async {
-            super::spawn(async { super::spawn_blocking(|| 2 + 2).await.unwrap() }).await
+            super::spawn(async { super::spawn_blocking(|| 2 + 2).await }).await
         });
         assert_eq!(four, 4);
     }
@@ -35,9 +35,7 @@ mod tests {
     #[test]
     fn spawn_blocking_spawn() {
         let four = super::block_on(async {
-            let four = super::spawn_blocking(|| super::spawn(async { 2 + 2 }))
-                .await
-                .unwrap();
+            let four = super::spawn_blocking(|| super::spawn(async { 2 + 2 })).await;
             four.await
         });
         assert_eq!(four, 4);

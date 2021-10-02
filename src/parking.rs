@@ -47,6 +47,10 @@ impl Parking {
         let _waiting = self.waiting.lock();
         self.signal.notify_all();
     }
+
+    pub fn is_empty(&self) -> bool {
+        *self.waiting.lock().unwrap() == 0
+    }
 }
 
 impl ArcWake for Parking {

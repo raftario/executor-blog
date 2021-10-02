@@ -9,10 +9,7 @@ use tokio::select;
 
 macro_rules! println {
     ($($arg:tt)*) => {
-        ::futures::FutureExt::map(
-            ::executor::spawn_blocking(move || ::std::println!($($arg)*)),
-            ::std::result::Result::unwrap,
-        )
+        ::executor::spawn_blocking(move || ::std::println!($($arg)*))
     }
 }
 
