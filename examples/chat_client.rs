@@ -8,6 +8,15 @@ use std::{
 };
 use tokio::select;
 
+macro_rules! println {
+    ($($arg:tt)*) => {
+        ::futures::FutureExt::map(
+            ::executor::spawn_blocking(move || ::std::println!($($arg)*)),
+            ::std::result::Result::unwrap,
+        )
+    }
+}
+
 fn main() {
     let executor = Executor::new();
     executor.block_on(client())
@@ -34,9 +43,7 @@ async fn client() {
                 let msg = std::str::from_utf8(mbuf.as_ref());
                 if let Ok(msg) = msg {
                     let msg = msg.to_string();
-                    executor::spawn_blocking(move || println!("{}", msg))
-                        .await
-                        .unwrap();
+                    println!("{}", msg).await;
                 }
             },
             res = rx.recv_async() => {
