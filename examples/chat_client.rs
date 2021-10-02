@@ -1,9 +1,9 @@
 use async_net::TcpStream;
 use flume::Sender;
 use futures::{AsyncReadExt, AsyncWriteExt};
-use std::{
-    io::{self, BufRead},
-    thread,
+use std::io::{
+    self, BufRead,
+    ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted, UnexpectedEof},
 };
 use tokio::select;
 
@@ -21,7 +21,7 @@ async fn client() {
     let mut stream = TcpStream::connect("localhost:8080").await.unwrap();
     let (tx, rx) = flume::unbounded();
 
-    thread::spawn(move || reader(tx));
+    executor::spawn_blocking(move || reader(tx)).detach();
 
     let mut nbuf = [0; 4];
     let mut mbuf = vec![0; 4];
@@ -29,7 +29,20 @@ async fn client() {
     loop {
         select! {
             res = stream.read_exact(nbuf.as_mut()) => {
-                res.unwrap();
+                match res {
+                    Err(e)
+                        if e.kind() == ConnectionReset
+                            || e.kind() == ConnectionAborted
+                            || e.kind() == UnexpectedEof =>
+                    {
+                        break
+                    }
+                    Err(e) if e.kind() == Interrupted => continue,
+                    res => {
+                        res.unwrap();
+                    }
+                }
+
                 let len = u32::from_ne_bytes(nbuf) as usize;
 
                 mbuf.resize(len, 0);

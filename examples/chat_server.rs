@@ -1,5 +1,6 @@
 use async_net::{TcpListener, TcpStream};
 use futures::{AsyncReadExt, AsyncWriteExt};
+use std::io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted, UnexpectedEof};
 use tokio::{
     select,
     sync::broadcast::{self, Receiver, Sender},
@@ -26,7 +27,20 @@ async fn client(mut stream: TcpStream, tx: Sender<String>, mut rx: Receiver<Stri
     loop {
         select! {
             res = stream.read_exact(nbuf.as_mut()) => {
-                res.unwrap();
+                match res {
+                    Err(e)
+                        if e.kind() == ConnectionReset
+                            || e.kind() == ConnectionAborted
+                            || e.kind() == UnexpectedEof =>
+                    {
+                        break
+                    }
+                    Err(e) if e.kind() == Interrupted => continue,
+                    res => {
+                        res.unwrap();
+                    }
+                }
+
                 let len = u32::from_ne_bytes(nbuf) as usize;
 
                 mbuf.resize(len, 0);
