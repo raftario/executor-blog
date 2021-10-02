@@ -39,6 +39,10 @@ struct Handle {
     refs: AtomicUsize,
 }
 
+struct EnterGuard {
+    previous: Option<WeakExecutor>,
+}
+
 pub struct BlockingTask<T> {
     handle: Option<JoinHandle<T>>,
     shared: Arc<(AtomicWaker, AtomicBool)>,
@@ -82,7 +86,7 @@ impl Executor {
         let waker = futures::task::waker(parking.clone());
         let mut context = Context::from_waker(&waker);
 
-        set_current(self.downgrade());
+        let _guard = self.downgrade().enter();
 
         let output = loop {
             match future.as_mut().poll(&mut context) {
@@ -91,7 +95,6 @@ impl Executor {
             }
         };
 
-        clear_current();
         output
     }
 
@@ -122,13 +125,11 @@ impl Executor {
         let thread_executor = self.downgrade();
 
         let handle = thread::spawn(move || {
-            set_current(thread_executor);
+            let _guard = thread_executor.enter();
 
             let output = f();
             thread_shared.1.store(true, Release);
             thread_shared.0.wake();
-
-            clear_current();
 
             output
         });
@@ -157,6 +158,11 @@ impl WeakExecutor {
         Some(Executor {
             handle: self.handle.clone(),
         })
+    }
+
+    fn enter(self) -> EnterGuard {
+        let previous = CURRENT.with(|c| c.borrow_mut().replace(self));
+        EnterGuard { previous }
     }
 }
 
@@ -188,16 +194,8 @@ fn current() -> Option<WeakExecutor> {
     CURRENT.with(|c| c.borrow().clone())
 }
 
-fn set_current(executor: WeakExecutor) {
-    CURRENT.with(move |c| *c.borrow_mut() = Some(executor));
-}
-
-fn clear_current() {
-    CURRENT.with(move |c| *c.borrow_mut() = None);
-}
-
 fn worker_loop(worker: Worker<Runnable>, executor: WeakExecutor) {
-    set_current(executor.clone());
+    let _guard = executor.clone().enter();
 
     loop {
         let task = worker.pop().or_else(|| {
@@ -220,8 +218,6 @@ fn worker_loop(worker: Worker<Runnable>, executor: WeakExecutor) {
             None => executor.handle.parking.park(),
         }
     }
-
-    clear_current();
 }
 
 impl Clone for Executor {
@@ -244,6 +240,12 @@ impl Drop for Executor {
 impl Default for Executor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for EnterGuard {
+    fn drop(&mut self) {
+        CURRENT.with(|c| *c.borrow_mut() = self.previous.take());
     }
 }
 
