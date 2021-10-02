@@ -7,19 +7,22 @@ use std::{
     sync::{
         atomic::{
             AtomicUsize,
-            Ordering::{AcqRel, Acquire, SeqCst},
+            Ordering::{AcqRel, Acquire, Relaxed, SeqCst},
         },
         Arc, RwLock,
     },
     task::{Context, Poll},
     thread,
 };
+use tracing::{trace, trace_span, Span};
 
 use crate::parking::Parking;
 
 thread_local! {
     static CURRENT: RefCell<Option<WeakExecutor>> = RefCell::new(None);
 }
+
+static EXECUTOR_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub struct Executor {
     handle: Arc<Handle>,
@@ -34,18 +37,21 @@ struct Handle {
     asinc: AsyncHandle,
     blocking: BlockingHandle,
     refs: AtomicUsize,
+    span: Span,
 }
 
 struct AsyncHandle {
-    injector: Injector<Runnable>,
-    stealers: Box<[Stealer<Runnable>]>,
+    injector: Injector<(Runnable, Span)>,
+    stealers: Box<[Stealer<(Runnable, Span)>]>,
     parking: Parking,
+    task_id: AtomicUsize,
 }
 
 struct BlockingHandle {
-    injector: Injector<Runnable>,
-    stealers: RwLock<Vec<Stealer<Runnable>>>,
+    injector: Injector<(Runnable, Span)>,
+    stealers: RwLock<Vec<Stealer<(Runnable, Span)>>>,
     parking: Parking,
+    task_id: AtomicUsize,
 }
 
 struct EnterGuard {
@@ -59,6 +65,17 @@ impl Executor {
     }
 
     pub fn with_workers(num_async: usize, num_blocking: usize) -> Self {
+        let id = EXECUTOR_ID.fetch_add(1, Relaxed);
+        let span = trace_span!(target: "executor", "executor", id = id);
+
+        trace!(
+            target: "executor",
+            parent: &span,
+            "starting executor with {} async and up to {} blocking workers",
+            num_async,
+            num_blocking,
+        );
+
         let mut stealers = Vec::with_capacity(num_async);
         let mut workers = Vec::with_capacity(num_async);
         for _ in 0..num_async {
@@ -73,19 +90,32 @@ impl Executor {
                     injector: Injector::new(),
                     stealers: stealers.into_boxed_slice(),
                     parking: Parking::new(),
+                    task_id: AtomicUsize::new(0),
                 },
                 blocking: BlockingHandle {
                     injector: Injector::new(),
                     stealers: RwLock::new(Vec::with_capacity(num_blocking)),
                     parking: Parking::new(),
+                    task_id: AtomicUsize::new(0),
                 },
                 refs: AtomicUsize::new(1),
+                span,
             }),
         };
 
-        for worker in workers {
+        for (i, worker) in workers.into_iter().enumerate() {
+            trace!(
+                target: "executor",
+                parent: &executor.handle.span,
+                "starting async worker {}",
+                i,
+            );
+
             let executor = executor.downgrade();
-            thread::spawn(move || async_worker(worker, executor));
+            thread::Builder::new()
+                .name(format!("async-worker-{}", i))
+                .spawn(move || async_worker(worker, executor))
+                .unwrap();
         }
 
         executor
@@ -115,10 +145,21 @@ impl Executor {
         F: Send + 'static,
         F::Output: Send,
     {
+        let id = self.handle.asinc.task_id.fetch_add(1, Relaxed);
+        let span = trace_span!(
+            target: "executor",
+            parent: &self.handle.span,
+            "task",
+            id = id,
+        );
         let executor = self.downgrade();
 
         let (runnable, task) = async_task::spawn(future, move |runnable| {
-            executor.handle.asinc.injector.push(runnable);
+            executor
+                .handle
+                .asinc
+                .injector
+                .push((runnable, span.clone()));
             executor.handle.asinc.parking.unpark_one();
         });
 
@@ -132,26 +173,49 @@ impl Executor {
         T: Send + 'static,
     {
         let future = futures::future::lazy(move |_| f());
+        let id = self.handle.blocking.task_id.fetch_add(1, Relaxed);
+        let span = trace_span!(
+            target: "executor",
+            parent: &self.handle.span,
+            "blocking task",
+            id = id,
+        );
         let executor = self.downgrade();
 
         let (runnable, task) = async_task::spawn(future, move |runnable| {
             let handle = &executor.handle.blocking;
 
-            handle.injector.push(runnable);
+            handle.injector.push((runnable, span.clone()));
 
-            let should_start_worker = handle.parking.is_empty()
-                && handle
-                    .stealers
-                    .read()
-                    .map(|s| s.len() < s.capacity())
-                    .unwrap();
+            let (should_start_worker, worker_id) = handle
+                .parking
+                .is_empty()
+                .then(|| {
+                    handle
+                        .stealers
+                        .read()
+                        .map(|s| (s.len() < s.capacity(), s.len()))
+                        .unwrap()
+                })
+                .unwrap_or((false, 0));
+
             if should_start_worker {
+                trace!(
+                    target: "executor",
+                    parent: &executor.handle.span,
+                    "starting blocking worker {}",
+                    worker_id,
+                );
+
                 let worker = Worker::new_fifo();
                 let stealer = worker.stealer();
                 handle.stealers.write().unwrap().push(stealer);
 
                 let executor = executor.clone();
-                thread::spawn(move || blocking_worker(worker, executor));
+                thread::Builder::new()
+                    .name(format!("blocking-worker-{}", worker_id))
+                    .spawn(move || blocking_worker(worker, executor))
+                    .unwrap();
             } else {
                 handle.parking.unpark_one();
             }
@@ -172,8 +236,15 @@ impl WeakExecutor {
     fn upgrade(self) -> Option<Executor> {
         if self.handle.refs.fetch_add(1, AcqRel) == 0 {
             self.handle.refs.fetch_sub(1, AcqRel);
+
+            trace!(
+                target: "executor",
+                parent: &self.handle.span,
+                "shutting down executor",
+            );
             self.handle.asinc.parking.unpark_all();
             self.handle.blocking.parking.unpark_all();
+
             return None;
         }
 
@@ -223,7 +294,7 @@ fn current() -> Option<WeakExecutor> {
     CURRENT.with(|c| c.borrow().clone())
 }
 
-fn async_worker(worker: Worker<Runnable>, executor: WeakExecutor) {
+fn async_worker(worker: Worker<(Runnable, Span)>, executor: WeakExecutor) {
     let _guard = executor.clone().enter();
 
     let handle = &executor.handle.asinc;
@@ -242,16 +313,23 @@ fn async_worker(worker: Worker<Runnable>, executor: WeakExecutor) {
         });
 
         match task {
-            Some(task) => {
+            Some((task, span)) => {
+                let _span = span.enter();
                 task.run();
             }
             None if refs.load(Acquire) == 0 => break,
             None => handle.parking.park(),
         }
     }
+
+    trace!(
+        target: "executor",
+        parent: &executor.handle.span,
+        "shutting down worker",
+    );
 }
 
-fn blocking_worker(worker: Worker<Runnable>, executor: WeakExecutor) {
+fn blocking_worker(worker: Worker<(Runnable, Span)>, executor: WeakExecutor) {
     let _guard = executor.clone().enter();
 
     let handle = &executor.handle.blocking;
@@ -275,13 +353,20 @@ fn blocking_worker(worker: Worker<Runnable>, executor: WeakExecutor) {
         });
 
         match task {
-            Some(task) => {
+            Some((task, span)) => {
+                let _span = span.enter();
                 task.run();
             }
             None if refs.load(Acquire) == 0 => break,
             None => handle.parking.park(),
         }
     }
+
+    trace!(
+        target: "executor",
+        parent: &executor.handle.span,
+        "shutting down worker",
+    );
 }
 
 impl Clone for Executor {
@@ -296,6 +381,11 @@ impl Clone for Executor {
 impl Drop for Executor {
     fn drop(&mut self) {
         if self.handle.refs.fetch_sub(1, AcqRel) == 1 {
+            trace!(
+                target: "executor",
+                parent: &self.handle.span,
+                "shutting down executor",
+            );
             self.handle.asinc.parking.unpark_all();
             self.handle.blocking.parking.unpark_all();
         }

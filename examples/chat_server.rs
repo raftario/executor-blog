@@ -1,12 +1,22 @@
 use async_net::{TcpListener, TcpStream};
 use futures::{AsyncReadExt, AsyncWriteExt};
-use std::io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted, UnexpectedEof};
+use std::{
+    fmt,
+    io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted, UnexpectedEof},
+};
 use tokio::{
     select,
     sync::broadcast::{self, Receiver, Sender},
 };
+use tracing::{info, instrument};
+use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_thread_names(true)
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     executor::block_on(server())
 }
 
@@ -16,11 +26,16 @@ async fn server() {
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();
-        executor::spawn(client(stream, tx.clone(), tx.subscribe())).detach();
+        executor::spawn(client(DbgStream(stream), tx.clone(), tx.subscribe())).detach();
     }
 }
 
-async fn client(mut stream: TcpStream, tx: Sender<String>, mut rx: Receiver<String>) {
+#[instrument(skip(tx, rx))]
+async fn client(stream: DbgStream, tx: Sender<String>, mut rx: Receiver<String>) {
+    let DbgStream(mut stream) = stream;
+
+    info!("connected");
+
     let mut nbuf = [0; 4];
     let mut mbuf = vec![0; 4];
 
@@ -48,6 +63,8 @@ async fn client(mut stream: TcpStream, tx: Sender<String>, mut rx: Receiver<Stri
 
                 let msg = std::str::from_utf8(mbuf.as_ref());
                 if let Ok(msg) = msg {
+                    info!("message: {}", msg);
+
                     tx.send(msg.to_string()).unwrap();
                     rx.recv().await.unwrap();
                 }
@@ -63,5 +80,17 @@ async fn client(mut stream: TcpStream, tx: Sender<String>, mut rx: Receiver<Stri
                 stream.write_all(&mbuf).await.unwrap();
             },
         }
+    }
+
+    info!("disconnected");
+}
+
+struct DbgStream(TcpStream);
+
+impl fmt::Debug for DbgStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TcpStream")
+            .field(&self.0.peer_addr().unwrap())
+            .finish()
     }
 }
