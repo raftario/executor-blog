@@ -3,6 +3,7 @@ use crossbeam_deque::{Injector, Stealer, Worker};
 use std::{
     cell::RefCell,
     future::Future,
+    hash::{Hash, Hasher},
     iter,
     sync::{
         atomic::{
@@ -54,7 +55,7 @@ struct BlockingHandle {
     task_id: AtomicUsize,
 }
 
-struct EnterGuard {
+pub struct EnterGuard {
     previous: Option<WeakExecutor>,
 }
 
@@ -225,6 +226,18 @@ impl Executor {
         task
     }
 
+    pub fn current() -> Self {
+        CURRENT
+            .with(|c| c.borrow().clone())
+            .expect("not inside an executor context")
+            .upgrade()
+            .expect("executor is shutting down")
+    }
+
+    pub fn enter(&self) -> EnterGuard {
+        self.downgrade().enter()
+    }
+
     fn downgrade(&self) -> WeakExecutor {
         WeakExecutor {
             handle: self.handle.clone(),
@@ -260,8 +273,9 @@ impl WeakExecutor {
 }
 
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    current()
-        .map(|e| e.upgrade().expect("executor is shut down"))
+    CURRENT
+        .with(|c| c.borrow().clone())
+        .map(|e| e.upgrade().expect("executor is shutting down"))
         .unwrap_or_default()
         .block_on(future)
 }
@@ -271,11 +285,7 @@ where
     F: Send + 'static,
     F::Output: Send,
 {
-    current()
-        .expect("cannot implicitely spawn tasks outside of an executor context")
-        .upgrade()
-        .expect("executor is shut down")
-        .spawn(future)
+    Executor::current().spawn(future)
 }
 
 pub fn spawn_blocking<T, F: FnOnce() -> T>(f: F) -> Task<T>
@@ -283,15 +293,7 @@ where
     F: Send + 'static,
     T: Send + 'static,
 {
-    current()
-        .expect("cannot implicitely spawn tasks outside of an executor context")
-        .upgrade()
-        .expect("executor is shut down")
-        .spawn_blocking(f)
-}
-
-fn current() -> Option<WeakExecutor> {
-    CURRENT.with(|c| c.borrow().clone())
+    Executor::current().spawn_blocking(f)
 }
 
 fn async_worker(worker: Worker<(Runnable, Span)>, executor: WeakExecutor) {
@@ -395,6 +397,19 @@ impl Drop for Executor {
 impl Default for Executor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl PartialEq for Executor {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.handle, &other.handle)
+    }
+}
+impl Eq for Executor {}
+
+impl Hash for Executor {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.handle).hash(state);
     }
 }
 
