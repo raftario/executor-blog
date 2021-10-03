@@ -178,7 +178,7 @@ impl Executor {
         let span = trace_span!(
             target: "executor",
             parent: &self.handle.span,
-            "blocking task",
+            "blocking-task",
             id = id,
         );
         let executor = self.downgrade();
