@@ -7,7 +7,7 @@ use std::{
     sync::{
         atomic::{
             AtomicUsize,
-            Ordering::{AcqRel, Acquire, Relaxed, SeqCst},
+            Ordering::{AcqRel, Acquire, Relaxed, Release},
         },
         Arc, RwLock,
     },
@@ -235,7 +235,7 @@ impl Executor {
 impl WeakExecutor {
     fn upgrade(self) -> Option<Executor> {
         if self.handle.refs.fetch_add(1, AcqRel) == 0 {
-            self.handle.refs.fetch_sub(1, AcqRel);
+            self.handle.refs.fetch_sub(1, Release);
 
             trace!(
                 target: "executor",
@@ -371,7 +371,7 @@ fn blocking_worker(worker: Worker<(Runnable, Span)>, executor: WeakExecutor) {
 
 impl Clone for Executor {
     fn clone(&self) -> Self {
-        self.handle.refs.fetch_add(1, SeqCst);
+        self.handle.refs.fetch_add(1, Release);
         Self {
             handle: self.handle.clone(),
         }
